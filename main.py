@@ -9,7 +9,8 @@ from datetime import datetime
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QTextEdit, QListWidget, QListWidgetItem,
-    QSplitter, QComboBox, QMessageBox, QFrame, QInputDialog, QMenu, QAction
+    QSplitter, QComboBox, QMessageBox, QFrame, QInputDialog, QMenu, QAction,
+    QDialog, QSpinBox
 )
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QFont, QTextCharFormat, QColor, QTextCursor
@@ -68,7 +69,6 @@ def get_clean_text(raw_content):
     """
     if not raw_content:
         return ""
-    # Вырезаем служебные блоки head и style целиком
     text = re.sub(r'<head[^>]*>.*?</head>', '', raw_content, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r'<[^>]+>', ' ', text)
@@ -76,30 +76,28 @@ def get_clean_text(raw_content):
     return text
 
 
-def ensure_html_formatting(raw_content):
+def ensure_html_formatting(raw_content, base_size=13, example_size=13):
     """
-    Отображение записи в ридере:
-    - Блоки оформлены аккуратным фоном
-    - Шрифт умеренный (14pt, чуть крупнее 13.5pt, аккуратный средний размер)
-    - Скобки [ ] скрыты
+    Отображение записи в ридере с учетом пользовательских настроек размера шрифта.
     """
     if not raw_content:
         return ""
 
+    pattern_raw = re.compile(r'\[([^\]\n<]+)\]')
+    span_template = f'<span style="background-color: #1e293b; font-size: {example_size}pt; color: #e2e8f0; border-radius: 4px; padding: 2px 5px;"> \\1 </span>'
+
     if "<html" in raw_content.lower() or "<body" in raw_content.lower():
-        # Если это HTML из редактора, заменяем слишком крупный шрифт на умеренный средний (14pt)
-        modified = re.sub(r'font-size:\s*15\.5pt', 'font-size: 14pt', raw_content, flags=re.IGNORECASE)
-        # Также преобразуем любые оставшиеся сырые скобки [текст]
-        pattern = re.compile(r'\[([^\]\n<]+)\]')
+        # Заменяем размер шрифта у существующих span блоков на настроенный
+        modified = re.sub(r'font-size:\s*\d+(\.\d+)?pt', f'font-size: {example_size}pt', raw_content, flags=re.IGNORECASE)
+        # Преобразуем оставшиеся скобки, если есть
         def repl(m):
             t = m.group(1).strip()
-            return f'<span style="background-color: #1e293b; font-size: 14pt; color: #e2e8f0; border-radius: 4px; padding: 2px 5px;"> {t} </span>'
-        return pattern.sub(repl, modified)
+            return f'<span style="background-color: #1e293b; font-size: {example_size}pt; color: #e2e8f0; border-radius: 4px; padding: 2px 5px;"> {t} </span>'
+        modified = pattern_raw.sub(repl, modified)
+        return f'<div style="font-size: {base_size}pt; color: #e4e4e7; line-height: 1.7; font-family: -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif;">{modified}</div>'
     else:
-        # Обычный текст
         lines = raw_content.split("\n")
-        out = ['<div style="color: #e4e4e7; font-size: 13.5pt; line-height: 1.7; font-family: -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif;">']
-        pattern = re.compile(r'\[([^\]\n]+)\]')
+        out = [f'<div style="color: #e4e4e7; font-size: {base_size}pt; line-height: 1.7; font-family: -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif;">']
 
         for line in lines:
             if not line.strip():
@@ -107,29 +105,131 @@ def ensure_html_formatting(raw_content):
                 continue
 
             escaped = html.escape(line)
-            transformed = pattern.sub(
-                r'<span style="background-color: #1e293b; font-size: 14pt; color: #e2e8f0; border-radius: 4px; padding: 2px 5px;"> \1 </span>',
-                escaped
-            )
+            transformed = pattern_raw.sub(span_template, escaped)
             out.append(f"<div style='margin-bottom: 4px;'>{transformed}</div>")
 
         out.append("</div>")
         return "".join(out)
 
 
+class SettingsDialog(QDialog):
+    """
+    Диалог настройки размеров шрифта с живым предпросмотром.
+    """
+    def __init__(self, parent=None, db=None):
+        super().__init__(parent)
+        self.db = db
+        self.setWindowTitle("Настройки оформления дневника")
+        self.resize(520, 420)
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(14)
+        layout.setContentsMargins(24, 20, 24, 20)
+
+        lbl_hdr = QLabel("Настройки шрифта")
+        lbl_hdr.setObjectName("sectionHeader")
+        layout.addWidget(lbl_hdr)
+
+        # Base font size
+        row_base = QHBoxLayout()
+        lbl_base = QLabel("Размер основного текста:")
+        lbl_base.setObjectName("statItem")
+        self.spin_base = QSpinBox()
+        self.spin_base.setRange(9, 24)
+        current_base = int(float(self.db.get_setting("base_font_size", "13")))
+        self.spin_base.setValue(current_base)
+        self.spin_base.valueChanged.connect(self.update_preview)
+
+        row_base.addWidget(lbl_base)
+        row_base.addStretch()
+        row_base.addWidget(self.spin_base)
+        layout.addLayout(row_base)
+
+        # Example block font size
+        row_example = QHBoxLayout()
+        lbl_example = QLabel("Размер текста в блоках примеров:")
+        lbl_example.setObjectName("statItem")
+        self.spin_example = QSpinBox()
+        self.spin_example.setRange(9, 24)
+        current_example = int(float(self.db.get_setting("example_font_size", "13")))
+        self.spin_example.setValue(current_example)
+        self.spin_example.valueChanged.connect(self.update_preview)
+
+        row_example.addWidget(lbl_example)
+        row_example.addStretch()
+        row_example.addWidget(self.spin_example)
+        layout.addLayout(row_example)
+
+        # Live Preview Box
+        lbl_prev = QLabel("Предпросмотр")
+        lbl_prev.setObjectName("sectionHeader")
+        layout.addWidget(lbl_prev)
+
+        self.preview_box = QTextEdit()
+        self.preview_box.setReadOnly(True)
+        self.preview_box.setMaximumHeight(140)
+        layout.addWidget(self.preview_box)
+
+        self.update_preview()
+
+        # Dialog Buttons
+        row_btn = QHBoxLayout()
+        self.btn_reset = QPushButton("Сбросить по умолчанию")
+        self.btn_reset.setObjectName("btnSecondarySmall")
+        self.btn_reset.clicked.connect(self.reset_defaults)
+        row_btn.addWidget(self.btn_reset)
+
+        row_btn.addStretch()
+
+        self.btn_cancel = QPushButton("Отмена")
+        self.btn_cancel.clicked.connect(self.reject)
+        row_btn.addWidget(self.btn_cancel)
+
+        self.btn_save = QPushButton("Сохранить")
+        self.btn_save.setObjectName("btnPrimary")
+        self.btn_save.clicked.connect(self.save_settings)
+        row_btn.addWidget(self.btn_save)
+
+        layout.addLayout(row_btn)
+
+    def update_preview(self):
+        base_sz = self.spin_base.value()
+        ex_sz = self.spin_example.value()
+        sample_text = (
+            f"Тема: Основная грамматика\n"
+            f"1. именительный падеж (частичка [は])\n"
+            f"[Сущ1 は Сущ2 です]\n"
+            f"Обычный текст пояснения к правилу."
+        )
+        self.preview_box.setHtml(ensure_html_formatting(sample_text, base_sz, ex_sz))
+
+    def reset_defaults(self):
+        self.spin_base.setValue(13)
+        self.spin_example.setValue(13)
+
+    def save_settings(self):
+        self.db.set_setting("base_font_size", str(self.spin_base.value()))
+        self.db.set_setting("example_font_size", str(self.spin_example.value()))
+        self.accept()
+
+
 class DiaryTextEdit(QTextEdit):
     """
     Редактор дневника:
-    При вводе скобок [пример] в процессе написания
-    скобки мгновенно исчезают, а текст внутри превращается в аккуратный блок-выделение
-    с умеренным размером шрифта (14pt).
+    При вводе скобок [пример] скобки мгновенно исчезают,
+    а текст внутри превращается в аккуратный блок-выделение
+    с размером из настроек.
     """
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, base_font_size=13, example_font_size=13):
         super().__init__(parent)
         self.setAcceptRichText(True)
+        self.base_font_size = float(base_font_size)
+        self.example_font_size = float(example_font_size)
 
         self.default_format = QTextCharFormat()
-        self.default_format.setFontPointSize(13.5)
+        self.default_format.setFontPointSize(self.base_font_size)
         self.default_format.setForeground(QColor("#e4e4e7"))
         self.default_format.setBackground(QColor("transparent"))
         self.default_format.setFontWeight(QFont.Normal)
@@ -150,9 +250,8 @@ class DiaryTextEdit(QTextEdit):
                 cursor.setPosition(start_pos)
                 cursor.setPosition(end_pos, QTextCursor.KeepAnchor)
 
-                # Умеренный средний размер шрифта (14pt при базовом 13.5pt)
                 fmt = QTextCharFormat()
-                fmt.setFontPointSize(14.0)
+                fmt.setFontPointSize(self.example_font_size)
                 fmt.setBackground(QColor("#1e293b"))
                 fmt.setForeground(QColor("#e2e8f0"))
                 fmt.setFontWeight(QFont.Normal)
@@ -179,7 +278,7 @@ class DiaryTextEdit(QTextEdit):
                 c.setPosition(end, QTextCursor.KeepAnchor)
 
                 fmt = QTextCharFormat()
-                fmt.setFontPointSize(14.0)
+                fmt.setFontPointSize(self.example_font_size)
                 fmt.setBackground(QColor("#1e293b"))
                 fmt.setForeground(QColor("#e2e8f0"))
                 fmt.setFontWeight(QFont.Normal)
@@ -219,6 +318,9 @@ class EntryEditorWindow(QMainWindow):
         self.categories = [c["name"] for c in (categories or [])]
         self.preselected_category = preselected_category
         self.start_timestamp = time.time()
+
+        self.base_font_size = float(self.db.get_setting("base_font_size", "13"))
+        self.example_font_size = float(self.db.get_setting("example_font_size", "13"))
 
         self.setWindowTitle("Редактирование записи" if entry else "Новая запись")
         self.init_ui()
@@ -274,7 +376,11 @@ class EntryEditorWindow(QMainWindow):
         lbl_content.setObjectName("sectionHeader")
         vbox_content.addWidget(lbl_content)
 
-        self.text_content = DiaryTextEdit()
+        self.text_content = DiaryTextEdit(
+            self,
+            base_font_size=self.base_font_size,
+            example_font_size=self.example_font_size
+        )
         self.text_content.setObjectName("editorText")
         self.text_content.setPlaceholderText("Пишите сюда свои мысли. Пример можно обрамить [в квадратные скобки] — скобки сразу исчезнут, и текст станет аккуратным блоком...")
         self.text_content.textChanged.connect(self.update_counts)
@@ -491,6 +597,13 @@ class MainWindow(QMainWindow):
         stats_layout.addWidget(self.stat_count)
 
         sb_layout.addWidget(stats_box)
+
+        # Settings Button
+        self.btn_settings = QPushButton("⚙ Настройки шрифта")
+        self.btn_settings.setObjectName("btnSecondarySmall")
+        self.btn_settings.clicked.connect(self.open_settings)
+        sb_layout.addWidget(self.btn_settings)
+
         splitter.addWidget(sidebar)
 
         # 2. Middle Panel: Entries List (Cards)
@@ -563,6 +676,12 @@ class MainWindow(QMainWindow):
 
         splitter.setSizes([240, 360, 540])
         layout.addWidget(splitter)
+
+    def open_settings(self):
+        dialog = SettingsDialog(self, db=self.db)
+        if dialog.exec_() == QDialog.Accepted:
+            # Refresh current entry view with new font sizes
+            self.on_entry_selected()
 
     # Context Menu for Categories
     def on_category_context_menu(self, pos):
@@ -761,8 +880,12 @@ class MainWindow(QMainWindow):
         )
         self.view_meta.setText(meta_text)
         
+        # Load font sizes from settings
+        base_sz = int(float(self.db.get_setting("base_font_size", "13")))
+        ex_sz = int(float(self.db.get_setting("example_font_size", "13")))
+        
         # Display formatted HTML
-        self.view_content.setHtml(ensure_html_formatting(entry["content"]))
+        self.view_content.setHtml(ensure_html_formatting(entry["content"], base_sz, ex_sz))
         self.btn_edit.setEnabled(True)
         self.btn_delete.setEnabled(True)
 

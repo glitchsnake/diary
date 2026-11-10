@@ -49,6 +49,35 @@ class DiaryDB:
                 char_count INTEGER DEFAULT 0
             )
         """)
+
+        # Settings table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        """)
+        # Initialize default font sizes if not set
+        cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('base_font_size', '13')")
+        cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('example_font_size', '13')")
+
+        conn.commit()
+        conn.close()
+
+    def get_setting(self, key, default=None):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        row = cursor.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+        conn.close()
+        return row["value"] if row else default
+
+    def set_setting(self, key, value):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO settings (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """, (key, str(value)))
         conn.commit()
         conn.close()
 
@@ -121,7 +150,6 @@ class DiaryDB:
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute("DELETE FROM categories WHERE name = ?", (name,))
-        # Entries in deleted category safely move to "Общее"
         cursor.execute("INSERT OR IGNORE INTO categories (name) VALUES ('Общее')")
         cursor.execute("UPDATE entries SET topic = 'Общее' WHERE topic = ?", (name,))
         conn.commit()

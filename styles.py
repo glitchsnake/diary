@@ -68,7 +68,7 @@ def get_stylesheet():
     }
 
     /* Inputs */
-    QLineEdit, QComboBox, QTextEdit {
+    QLineEdit, QComboBox, QTextEdit, QSpinBox {
         background-color: #1f2025;
         color: #fafafa;
         border: 1px solid #2e3038;
@@ -78,7 +78,7 @@ def get_stylesheet():
         selection-color: #ffffff;
     }
 
-    QLineEdit:focus, QComboBox:focus, QTextEdit:focus {
+    QLineEdit:focus, QComboBox:focus, QTextEdit:focus, QSpinBox:focus {
         border: 1px solid #3b82f6;
     }
 
@@ -91,8 +91,6 @@ def get_stylesheet():
 
     QTextEdit#editorText {
         background-color: #1b1c21;
-        font-size: 15px;
-        line-height: 1.6;
         padding: 14px;
         border-radius: 8px;
         border: 1px solid #282930;
@@ -101,9 +99,6 @@ def get_stylesheet():
     QTextEdit#viewerText {
         background-color: transparent;
         border: none;
-        font-size: 15px;
-        line-height: 1.7;
-        color: #e4e4e7;
     }
 
     /* Buttons */
