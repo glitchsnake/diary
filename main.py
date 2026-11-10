@@ -306,13 +306,14 @@ class DiaryTextEdit(QTextEdit):
 class EntryEditorWindow(QMainWindow):
     """
     Полноэкранное окно создания / редактирования записи.
-    При закрытии или сохранении обязательно передает фокус обратно главному приложению.
+    Создается как независимое окно (super().__init__(None)),
+    чтобы оконный менеджер (Wayland/X11) никогда не блокировал родительское окно.
     """
     saved = pyqtSignal()
 
-    def __init__(self, parent=None, db=None, entry=None, categories=None, preselected_category=None):
-        super().__init__(parent)
-        self.parent_window = parent
+    def __init__(self, parent_window=None, db=None, entry=None, categories=None, preselected_category=None):
+        super().__init__(None)
+        self.parent_window = parent_window
         self.db = db
         self.entry = entry
         self.categories = [c["name"] for c in (categories or [])]
@@ -456,7 +457,7 @@ class EntryEditorWindow(QMainWindow):
         self.lbl_counter.setText(f"{words} слов  •  {chars} знаков")
 
     def return_to_parent(self):
-        if self.parent_window:
+        if self.parent_window and self.parent_window.isVisible():
             self.parent_window.showMaximized()
             self.parent_window.raise_()
             self.parent_window.activateWindow()
@@ -916,7 +917,7 @@ class MainWindow(QMainWindow):
     def on_new_entry(self):
         categories = self.db.get_categories()
         editor = EntryEditorWindow(
-            parent=self,
+            parent_window=self,
             db=self.db,
             categories=categories,
             preselected_category=self.selected_topic
@@ -935,7 +936,7 @@ class MainWindow(QMainWindow):
 
         categories = self.db.get_categories()
         editor = EntryEditorWindow(
-            parent=self,
+            parent_window=self,
             db=self.db,
             entry=entry,
             categories=categories
@@ -948,6 +949,16 @@ class MainWindow(QMainWindow):
     def _cleanup_editor(self, editor):
         if editor in self.active_editor_windows:
             self.active_editor_windows.remove(editor)
+
+    def closeEvent(self, event):
+        # Закрываем все открытые редакторы при закрытии главного окна
+        for editor in list(self.active_editor_windows):
+            try:
+                editor.close()
+            except Exception:
+                pass
+        event.accept()
+        QApplication.quit()
 
     def on_delete_entry(self):
         if not self.current_entry_id:
