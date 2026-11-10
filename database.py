@@ -1,6 +1,57 @@
 import os
 import sqlite3
+import re
 from datetime import datetime
+
+
+def update_html_font_sizes(html_text, base_size=12, example_size=12):
+    if not html_text:
+        return ""
+
+    pattern_raw = re.compile(r'\[([^\]\n<]+)\]')
+    span_template = f'<span style="background-color: #1e293b; font-size: {example_size}pt; color: #e2e8f0; border-radius: 4px; padding: 2px 5px;"> \\1 </span>'
+
+    # If it is HTML
+    if "<html" in html_text.lower() or "<body" in html_text.lower():
+        # 1. Update block spans with background-color: #1e293b
+        def repl_block(m):
+            style = m.group(1)
+            style = re.sub(r'font-size:\s*[^;]+;', f'font-size: {example_size}pt;', style)
+            if 'font-size' not in style:
+                style += f' font-size: {example_size}pt;'
+            return f'<span style="{style}">'
+
+        res = re.sub(r'<span style="([^"]*1e293b[^"]*)">', repl_block, html_text)
+
+        # 2. Update normal spans
+        def repl_normal(m):
+            style = m.group(1)
+            if '1e293b' in style:
+                return m.group(0)
+            style = re.sub(r'font-size:\s*[^;]+;', f'font-size: {base_size}pt;', style)
+            return f'<span style="{style}">'
+
+        res = re.sub(r'<span style="([^"]*)">', repl_normal, res)
+
+        # 3. Update body font-size if present
+        res = re.sub(r'(<body[^>]*font-size:)\s*[^;]+;', f'\\1{base_size}pt;', res)
+
+        # 4. Any raw brackets
+        res = pattern_raw.sub(span_template, res)
+        return res
+    else:
+        # Plain text
+        lines = html_text.split("\n")
+        out = [f'<div style="color: #e4e4e7; font-size: {base_size}pt; line-height: 1.7; font-family: -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif;">']
+        for line in lines:
+            if not line.strip():
+                out.append("<div style='height: 10px;'></div>")
+                continue
+            escaped = line.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            transformed = pattern_raw.sub(span_template, escaped)
+            out.append(f"<div style='margin-bottom: 4px;'>{transformed}</div>")
+        out.append("</div>")
+        return "".join(out)
 
 
 class DiaryDB:
@@ -57,9 +108,8 @@ class DiaryDB:
                 value TEXT NOT NULL
             )
         """)
-        # Initialize default font sizes if not set
         cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('base_font_size', '13')")
-        cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('example_font_size', '13')")
+        cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('example_font_size', '12')")
 
         conn.commit()
         conn.close()
@@ -78,6 +128,16 @@ class DiaryDB:
             INSERT INTO settings (key, value) VALUES (?, ?)
             ON CONFLICT(key) DO UPDATE SET value = excluded.value
         """, (key, str(value)))
+        conn.commit()
+        conn.close()
+
+    def update_all_entries_font_sizes(self, base_size, example_size):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        rows = cursor.execute("SELECT id, content FROM entries").fetchall()
+        for r in rows:
+            updated = update_html_font_sizes(r["content"], base_size, example_size)
+            cursor.execute("UPDATE entries SET content = ? WHERE id = ?", (updated, r["id"]))
         conn.commit()
         conn.close()
 
@@ -227,8 +287,14 @@ class DiaryDB:
         now = datetime.now()
         date_str = now.strftime("%Y-%m-%d")
         created_at_str = now.strftime("%Y-%m-%d %H:%M")
-        words = len(content.split()) if content else 0
-        chars = len(content)
+        
+        # Calculate clean text word and char counts
+        clean_text = re.sub(r'<head[^>]*>.*?</head>', '', content, flags=re.DOTALL | re.IGNORECASE)
+        clean_text = re.sub(r'<style[^>]*>.*?</style>', '', clean_text, flags=re.DOTALL | re.IGNORECASE)
+        clean_text = re.sub(r'<[^>]+>', ' ', clean_text)
+        clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+        words = len(clean_text.split()) if clean_text else 0
+        chars = len(clean_text)
 
         conn = self.get_connection()
         cursor = conn.cursor()
@@ -246,8 +312,13 @@ class DiaryDB:
         title = title.strip() or "Запись без названия"
         topic = topic.strip() or "Общее"
         content = content.strip()
-        words = len(content.split()) if content else 0
-        chars = len(content)
+        
+        clean_text = re.sub(r'<head[^>]*>.*?</head>', '', content, flags=re.DOTALL | re.IGNORECASE)
+        clean_text = re.sub(r'<style[^>]*>.*?</style>', '', clean_text, flags=re.DOTALL | re.IGNORECASE)
+        clean_text = re.sub(r'<[^>]+>', ' ', clean_text)
+        clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+        words = len(clean_text.split()) if clean_text else 0
+        chars = len(clean_text)
 
         conn = self.get_connection()
         cursor = conn.cursor()
