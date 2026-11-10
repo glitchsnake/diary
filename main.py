@@ -12,7 +12,7 @@ from PyQt5.QtWidgets import (
     QSplitter, QComboBox, QMessageBox, QFrame, QInputDialog, QMenu, QAction
 )
 from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QFont, QSyntaxHighlighter, QTextCharFormat, QColor, QTextCursor
+from PyQt5.QtGui import QFont, QTextCharFormat, QColor, QTextCursor
 
 from database import DiaryDB
 from styles import get_stylesheet
@@ -61,109 +61,144 @@ def format_duration(seconds):
     return f"{seconds} сек"
 
 
-def format_entry_to_html(raw_text):
-    """
-    Преобразует блоки [Пример: ...] и [] в визуальные карточки (Callouts).
-    Квадратные скобки исчезают, а текст оборачивается в карточку с рамкой.
-    """
-    if not raw_text:
+def get_clean_text(raw_content):
+    """Извлекает чистый текст без HTML тегов для превью и подсчета слов"""
+    if not raw_content:
         return ""
-
-    pattern_bracket = re.compile(r'\[(Пример|Важно|Заметка)?:?\s*([\s\S]*?)\]', re.IGNORECASE)
-    pattern_empty = re.compile(r'^\[\]\s*(.*)$')
-
-    def render_card(label, content):
-        label_upper = (label or "ПРИМЕР").upper()
-        if label_upper == "ВАЖНО":
-            color = "#f87171"
-            bg = "#291616"
-        elif label_upper == "ЗАМЕТКА":
-            color = "#a78bfa"
-            bg = "#20182b"
-        else:
-            color = "#38bdf8"
-            bg = "#131d2e"
-
-        content_escaped = html.escape(content).replace("\n", "<br>")
-        return (
-            f'<div style="background-color: {bg}; border-left: 3px solid {color}; '
-            f'border-radius: 6px; padding: 10px 14px; margin: 10px 0;">'
-            f'<div style="color: {color}; font-size: 11px; font-weight: bold; '
-            f'letter-spacing: 0.6px; margin-bottom: 4px;">{label_upper}</div>'
-            f'<div style="color: #f1f5f9; font-size: 14.5px; line-height: 1.6;">{content_escaped}</div>'
-            f'</div>'
-        )
-
-    processed = raw_text
-
-    def repl_bracket(match):
-        lbl = match.group(1) or "ПРИМЕР"
-        cnt = match.group(2) or ""
-        return f"\n<<<CALLOUT|{lbl}|{cnt}>>>\n"
-
-    processed = pattern_bracket.sub(repl_bracket, processed)
-    processed = pattern_empty.sub(lambda m: f"\n<<<CALLOUT|ПРИМЕР|{m.group(1)}>>>\n", processed)
-
-    parts = processed.split("\n")
-    out = ['<div style="color: #e4e4e7; font-size: 14.5px; line-height: 1.7; font-family: -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif;">']
-
-    for p in parts:
-        p_strip = p.strip()
-        if p_strip.startswith("<<<CALLOUT|") and p_strip.endswith(">>>"):
-            c_parts = p_strip[11:-3].split("|", 1)
-            lbl = c_parts[0]
-            cnt = c_parts[1] if len(c_parts) > 1 else ""
-            out.append(render_card(lbl, cnt))
-        else:
-            if p:
-                out.append(f"<div style='margin-bottom: 4px;'>{html.escape(p)}</div>")
-            else:
-                out.append("<div style='height: 8px;'></div>")
-
-    out.append("</div>")
-    return "".join(out)
+    text = re.sub(r'<[^>]+>', ' ', raw_content)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
 
 
-class CalloutHighlighter(QSyntaxHighlighter):
+def ensure_html_formatting(raw_content):
     """
-    Подсветка синтаксиса [Пример: ...] в редакторе на лету:
-    мягко подсвечивает рамку/фон блока и ключевое слово.
+    Если в тексте остались старые скобки [текст],
+    преобразует их в блоки со стилями (без добавления слова 'пример').
     """
-    def __init__(self, document):
-        super().__init__(document)
-        self.fmt_block = QTextCharFormat()
-        self.fmt_block.setBackground(QColor("#1e293b"))
-        self.fmt_block.setForeground(QColor("#f8fafc"))
+    if not raw_content:
+        return ""
+    if "<html" in raw_content.lower() or "<body" in raw_content.lower():
+        # Already HTML, ensure any raw brackets inside are transformed
+        pattern = re.compile(r'\[([^\]\n<]+)\]')
+        def repl(m):
+            t = m.group(1).strip()
+            return f'<span style="background-color: #1e293b; font-size: 15.5pt; color: #e2e8f0; border-radius: 4px; padding: 2px 6px;"> {t} </span>'
+        return pattern.sub(repl, raw_content)
+    else:
+        # Plain text
+        lines = raw_content.split("\n")
+        out = ['<div style="color: #e4e4e7; font-size: 13.5pt; line-height: 1.7; font-family: -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif;">']
+        pattern = re.compile(r'\[([^\]\n]+)\]')
 
-        self.fmt_bracket = QTextCharFormat()
-        self.fmt_bracket.setForeground(QColor("#64748b"))
+        for line in lines:
+            if not line.strip():
+                out.append("<div style='height: 10px;'></div>")
+                continue
 
-        self.fmt_keyword = QTextCharFormat()
-        self.fmt_keyword.setForeground(QColor("#38bdf8"))
-        self.fmt_keyword.setFontWeight(QFont.Bold)
+            escaped = html.escape(line)
+            # Превращаем [текст] в средний блок-выделение
+            transformed = pattern.sub(
+                r'<span style="background-color: #1e293b; font-size: 15.5pt; color: #e2e8f0; border-radius: 4px; padding: 2px 6px;"> \1 </span>',
+                escaped
+            )
+            out.append(f"<div style='margin-bottom: 4px;'>{transformed}</div>")
 
-    def highlightBlock(self, text):
-        pattern = re.compile(r'\[(Пример|Важно|Заметка)?:?([^\]]*)\]', re.IGNORECASE)
-        for match in pattern.finditer(text):
-            start = match.start()
-            length = match.end() - start
-            # Фон всего блока
-            self.setFormat(start, length, self.fmt_block)
-            # Скобка открытия
-            self.setFormat(start, 1, self.fmt_bracket)
-            # Скобка закрытия
-            self.setFormat(match.end() - 1, 1, self.fmt_bracket)
+        out.append("</div>")
+        return "".join(out)
 
-            # Ключевое слово
-            if match.group(1):
-                kw_len = len(match.group(1)) + 1
-                self.setFormat(start + 1, kw_len, self.fmt_keyword)
+
+class DiaryTextEdit(QTextEdit):
+    """
+    Редактор дневника:
+    При вводе скобок [пример] в процессе написания
+    скобки мгновенно исчезают, а текст внутри превращается в блок-выделение
+    со средним чуть увеличенным шрифтом (без лишних слов и без жирного белого цвета).
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptRichText(True)
+
+        self.default_format = QTextCharFormat()
+        self.default_format.setFontPointSize(13.5)
+        self.default_format.setForeground(QColor("#e4e4e7"))
+        self.default_format.setBackground(QColor("transparent"))
+        self.default_format.setFontWeight(QFont.Normal)
+        self.setCurrentCharFormat(self.default_format)
+
+    def convert_live_bracket(self):
+        cursor = self.textCursor()
+        block_text = cursor.block().text()
+        pos_in_block = cursor.positionInBlock()
+
+        last_open = block_text[:pos_in_block].rfind('[')
+        if last_open != -1:
+            content = block_text[last_open + 1 : pos_in_block].strip()
+            if content:
+                start_pos = cursor.block().position() + last_open
+                end_pos = cursor.block().position() + pos_in_block
+
+                cursor.setPosition(start_pos)
+                cursor.setPosition(end_pos, QTextCursor.KeepAnchor)
+
+                # Средний шрифт (15.5pt вместо 13.5pt), блок-выделение (#1e293b), мягкий читаемый цвет
+                fmt = QTextCharFormat()
+                fmt.setFontPointSize(15.5)
+                fmt.setBackground(QColor("#1e293b"))
+                fmt.setForeground(QColor("#e2e8f0"))
+                fmt.setFontWeight(QFont.Normal)
+
+                cursor.insertText(' ' + content + ' ', fmt)
+                self.setCurrentCharFormat(self.default_format)
+                return True
+        return False
+
+    def convert_all_brackets(self):
+        text = self.toPlainText()
+        matches = list(re.finditer(r'\[([^\]\n]+)\]', text))
+        if not matches:
+            return
+
+        cursor = QTextCursor(self.document())
+        cursor.beginEditBlock()
+        for m in reversed(matches):
+            start, end = m.start(), m.end()
+            content = m.group(1).strip()
+            if content:
+                c = QTextCursor(self.document())
+                c.setPosition(start)
+                c.setPosition(end, QTextCursor.KeepAnchor)
+
+                fmt = QTextCharFormat()
+                fmt.setFontPointSize(15.5)
+                fmt.setBackground(QColor("#1e293b"))
+                fmt.setForeground(QColor("#e2e8f0"))
+                fmt.setFontWeight(QFont.Normal)
+
+                c.insertText(' ' + content + ' ', fmt)
+        cursor.endEditBlock()
+        self.setCurrentCharFormat(self.default_format)
+
+    def keyPressEvent(self, event):
+        # При вводе закрывающей квадратной скобки ']'
+        if event.text() == ']':
+            if self.convert_live_bracket():
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
+    def insertFromMimeData(self, source):
+        # При вставке текста
+        if source.hasText():
+            cursor = self.textCursor()
+            cursor.insertText(source.text(), self.default_format)
+            self.convert_all_brackets()
+        else:
+            super().insertFromMimeData(source)
 
 
 class EntryEditorWindow(QMainWindow):
     """
-    Отдельное полноэкранное окно создания / редактирования записи.
-    Не блокирует главное окно (немодальное).
+    Полноэкранное немодальное окно создания / редактирования записи.
     """
     saved = pyqtSignal()
 
@@ -221,44 +256,18 @@ class EntryEditorWindow(QMainWindow):
         vbox_topic.addLayout(row_cat)
         layout.addLayout(vbox_topic)
 
-        # Row 3: Text Content with Formatting Toolbar
+        # Row 3: Text Content
         vbox_content = QVBoxLayout()
         vbox_content.setSpacing(6)
 
-        row_toolbar = QHBoxLayout()
         lbl_content = QLabel("Текст")
         lbl_content.setObjectName("sectionHeader")
-        row_toolbar.addWidget(lbl_content)
-        row_toolbar.addStretch()
+        vbox_content.addWidget(lbl_content)
 
-        # Quick Callout Buttons
-        self.btn_insert_example = QPushButton("+ Блок примера (Ctrl+E)")
-        self.btn_insert_example.setObjectName("btnSecondarySmall")
-        self.btn_insert_example.setToolTip("Вставляет карточку для примера: [Пример: ...]")
-        self.btn_insert_example.clicked.connect(lambda: self.insert_callout("Пример"))
-
-        self.btn_insert_note = QPushButton("+ Заметка")
-        self.btn_insert_note.setObjectName("btnSecondarySmall")
-        self.btn_insert_note.clicked.connect(lambda: self.insert_callout("Заметка"))
-
-        self.btn_insert_warn = QPushButton("+ Важно")
-        self.btn_insert_warn.setObjectName("btnSecondarySmall")
-        self.btn_insert_warn.clicked.connect(lambda: self.insert_callout("Важно"))
-
-        row_toolbar.addWidget(self.btn_insert_example)
-        row_toolbar.addWidget(self.btn_insert_note)
-        row_toolbar.addWidget(self.btn_insert_warn)
-
-        vbox_content.addLayout(row_toolbar)
-
-        self.text_content = QTextEdit()
-        self.text_content.setAcceptRichText(False)
+        self.text_content = DiaryTextEdit()
         self.text_content.setObjectName("editorText")
-        self.text_content.setPlaceholderText("Пишите сюда свои мысли. Для создания блока примера введите [Пример: ...] или нажмите кнопку выше...")
+        self.text_content.setPlaceholderText("Пишите сюда свои мысли. Пример можно обрамить [в квадратные скобки] — скобки сразу исчезнут, и текст станет выделенным блоком...")
         self.text_content.textChanged.connect(self.update_counts)
-
-        # Attach Highlighter
-        self.highlighter = CalloutHighlighter(self.text_content.document())
 
         vbox_content.addWidget(self.text_content)
         layout.addLayout(vbox_content, stretch=1)
@@ -288,37 +297,18 @@ class EntryEditorWindow(QMainWindow):
             index = self.combo_category.findText(self.entry["topic"])
             if index >= 0:
                 self.combo_category.setCurrentIndex(index)
-            self.text_content.setPlainText(self.entry["content"])
+            raw = self.entry["content"]
+            if "<html" in raw.lower() or "<body" in raw.lower():
+                self.text_content.setHtml(raw)
+            else:
+                self.text_content.setPlainText(raw)
+                self.text_content.convert_all_brackets()
         elif self.preselected_category:
             index = self.combo_category.findText(self.preselected_category)
             if index >= 0:
                 self.combo_category.setCurrentIndex(index)
 
         self.update_counts()
-
-    def insert_callout(self, kind="Пример"):
-        cursor = self.text_content.textCursor()
-        prefix = f"[{kind}: "
-        suffix = "]"
-        
-        # If user selected text, wrap it
-        if cursor.hasSelection():
-            selected = cursor.selectedText()
-            cursor.insertText(f"{prefix}{selected}{suffix}")
-        else:
-            pos = cursor.position() + len(prefix)
-            cursor.insertText(f"{prefix}{suffix}")
-            cursor.setPosition(pos)
-            self.text_content.setTextCursor(cursor)
-        self.text_content.setFocus()
-
-    def keyPressEvent(self, event):
-        # Shortcut Ctrl+E for inserting example callout
-        if event.modifiers() == Qt.ControlModifier and event.key() == Qt.Key_E:
-            self.insert_callout("Пример")
-            event.accept()
-            return
-        super().keyPressEvent(event)
 
     def populate_categories(self):
         self.combo_category.clear()
@@ -344,15 +334,17 @@ class EntryEditorWindow(QMainWindow):
                 self.combo_category.setCurrentIndex(index)
 
     def update_counts(self):
-        text = self.text_content.toPlainText().strip()
-        words = len(text.split()) if text else 0
-        chars = len(self.text_content.toPlainText())
+        clean = get_clean_text(self.text_content.toHtml())
+        words = len(clean.split()) if clean else 0
+        chars = len(clean)
         self.lbl_counter.setText(f"{words} слов  •  {chars} знаков")
 
     def save_entry(self):
         title = self.edit_title.text().strip()
-        content = self.text_content.toPlainText().strip()
-        if not title and not content:
+        html_content = self.text_content.toHtml()
+        clean = get_clean_text(html_content)
+
+        if not title and not clean:
             QMessageBox.warning(self, "Внимание", "Запись не может быть пустой.")
             return
 
@@ -364,14 +356,14 @@ class EntryEditorWindow(QMainWindow):
                 entry_id=self.entry["id"],
                 title=title or "Запись без названия",
                 topic=topic,
-                content=content,
+                content=html_content,
                 added_duration_seconds=elapsed_seconds
             )
         else:
             self.db.add_entry(
                 title=title or "Запись без названия",
                 topic=topic,
-                content=content,
+                content=html_content,
                 duration_seconds=elapsed_seconds
             )
 
@@ -540,9 +532,8 @@ class MainWindow(QMainWindow):
         self.view_meta.setWordWrap(True)
         cp_layout.addWidget(self.view_meta)
 
-        # Content (Styled HTML Reader)
+        # Content
         self.view_content = QTextEdit()
-        self.view_content.setAcceptRichText(False)
         self.view_content.setObjectName("viewerText")
         self.view_content.setReadOnly(True)
         cp_layout.addWidget(self.view_content)
@@ -552,7 +543,7 @@ class MainWindow(QMainWindow):
         splitter.setSizes([240, 360, 540])
         layout.addWidget(splitter)
 
-    # Context Menu for Categories (Right-Click)
+    # Context Menu for Categories
     def on_category_context_menu(self, pos):
         item = self.topics_list.itemAt(pos)
         category_name = item.data(Qt.UserRole) if item else None
@@ -674,12 +665,8 @@ class MainWindow(QMainWindow):
 
         for entry in entries:
             date_formatted = format_russian_date(entry["date"])
-            preview = entry["content"].replace("\n", " ").strip()
-            # Clean preview from callout brackets
-            preview = re.sub(r'\[(Пример|Важно|Заметка)?:?\s*', '', preview)
-            preview = preview.replace(']', '')
-            if len(preview) > 55:
-                preview = preview[:55] + "..."
+            clean = get_clean_text(entry["content"])
+            preview = clean[:55] + "..." if len(clean) > 55 else clean
 
             card_text = (
                 f"{entry['title']}\n"
@@ -744,14 +731,17 @@ class MainWindow(QMainWindow):
 
         writing_duration = format_duration(entry["duration_seconds"])
 
+        clean = get_clean_text(entry["content"])
+        word_count = len(clean.split()) if clean else 0
+
         meta_text = (
             f"{date_formatted}   •   Категория: {entry['topic']}   •   "
-            f"Время письма: {writing_duration}   •   {entry['word_count']} слов"
+            f"Время письма: {writing_duration}   •   {word_count} слов"
         )
         self.view_meta.setText(meta_text)
         
-        # Render HTML with Callouts (brackets disappear and transform into cards)
-        self.view_content.setHtml(format_entry_to_html(entry["content"]))
+        # Display formatted HTML
+        self.view_content.setHtml(ensure_html_formatting(entry["content"]))
         self.btn_edit.setEnabled(True)
         self.btn_delete.setEnabled(True)
 
@@ -778,7 +768,6 @@ class MainWindow(QMainWindow):
             self.db.add_category(name.strip())
             self.load_categories()
 
-    # Modeless Fullscreen Editor Window Openers
     def on_new_entry(self):
         categories = self.db.get_categories()
         editor = EntryEditorWindow(
