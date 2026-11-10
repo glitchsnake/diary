@@ -127,6 +127,7 @@ class EntryEditorWindow(QMainWindow):
         lbl_content.setObjectName("sectionHeader")
 
         self.text_content = QTextEdit()
+        self.text_content.setAcceptRichText(False)
         self.text_content.setObjectName("editorText")
         self.text_content.setPlaceholderText("Пишите сюда свои мысли...")
         self.text_content.textChanged.connect(self.update_counts)
@@ -390,6 +391,7 @@ class MainWindow(QMainWindow):
 
         # Content
         self.view_content = QTextEdit()
+        self.view_content.setAcceptRichText(False)
         self.view_content.setObjectName("viewerText")
         self.view_content.setReadOnly(True)
         cp_layout.addWidget(self.view_content)
