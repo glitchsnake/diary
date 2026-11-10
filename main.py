@@ -2,6 +2,8 @@
 import sys
 import os
 import time
+import html
+import re
 from datetime import datetime
 
 from PyQt5.QtWidgets import (
@@ -10,7 +12,7 @@ from PyQt5.QtWidgets import (
     QSplitter, QComboBox, QMessageBox, QFrame, QInputDialog, QMenu, QAction
 )
 from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QFont
+from PyQt5.QtGui import QFont, QSyntaxHighlighter, QTextCharFormat, QColor, QTextCursor
 
 from database import DiaryDB
 from styles import get_stylesheet
@@ -57,6 +59,105 @@ def format_duration(seconds):
     if mins > 0:
         return f"{mins} мин"
     return f"{seconds} сек"
+
+
+def format_entry_to_html(raw_text):
+    """
+    Преобразует блоки [Пример: ...] и [] в визуальные карточки (Callouts).
+    Квадратные скобки исчезают, а текст оборачивается в карточку с рамкой.
+    """
+    if not raw_text:
+        return ""
+
+    pattern_bracket = re.compile(r'\[(Пример|Важно|Заметка)?:?\s*([\s\S]*?)\]', re.IGNORECASE)
+    pattern_empty = re.compile(r'^\[\]\s*(.*)$')
+
+    def render_card(label, content):
+        label_upper = (label or "ПРИМЕР").upper()
+        if label_upper == "ВАЖНО":
+            color = "#f87171"
+            bg = "#291616"
+        elif label_upper == "ЗАМЕТКА":
+            color = "#a78bfa"
+            bg = "#20182b"
+        else:
+            color = "#38bdf8"
+            bg = "#131d2e"
+
+        content_escaped = html.escape(content).replace("\n", "<br>")
+        return (
+            f'<div style="background-color: {bg}; border-left: 3px solid {color}; '
+            f'border-radius: 6px; padding: 10px 14px; margin: 10px 0;">'
+            f'<div style="color: {color}; font-size: 11px; font-weight: bold; '
+            f'letter-spacing: 0.6px; margin-bottom: 4px;">{label_upper}</div>'
+            f'<div style="color: #f1f5f9; font-size: 14.5px; line-height: 1.6;">{content_escaped}</div>'
+            f'</div>'
+        )
+
+    processed = raw_text
+
+    def repl_bracket(match):
+        lbl = match.group(1) or "ПРИМЕР"
+        cnt = match.group(2) or ""
+        return f"\n<<<CALLOUT|{lbl}|{cnt}>>>\n"
+
+    processed = pattern_bracket.sub(repl_bracket, processed)
+    processed = pattern_empty.sub(lambda m: f"\n<<<CALLOUT|ПРИМЕР|{m.group(1)}>>>\n", processed)
+
+    parts = processed.split("\n")
+    out = ['<div style="color: #e4e4e7; font-size: 14.5px; line-height: 1.7; font-family: -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif;">']
+
+    for p in parts:
+        p_strip = p.strip()
+        if p_strip.startswith("<<<CALLOUT|") and p_strip.endswith(">>>"):
+            c_parts = p_strip[11:-3].split("|", 1)
+            lbl = c_parts[0]
+            cnt = c_parts[1] if len(c_parts) > 1 else ""
+            out.append(render_card(lbl, cnt))
+        else:
+            if p:
+                out.append(f"<div style='margin-bottom: 4px;'>{html.escape(p)}</div>")
+            else:
+                out.append("<div style='height: 8px;'></div>")
+
+    out.append("</div>")
+    return "".join(out)
+
+
+class CalloutHighlighter(QSyntaxHighlighter):
+    """
+    Подсветка синтаксиса [Пример: ...] в редакторе на лету:
+    мягко подсвечивает рамку/фон блока и ключевое слово.
+    """
+    def __init__(self, document):
+        super().__init__(document)
+        self.fmt_block = QTextCharFormat()
+        self.fmt_block.setBackground(QColor("#1e293b"))
+        self.fmt_block.setForeground(QColor("#f8fafc"))
+
+        self.fmt_bracket = QTextCharFormat()
+        self.fmt_bracket.setForeground(QColor("#64748b"))
+
+        self.fmt_keyword = QTextCharFormat()
+        self.fmt_keyword.setForeground(QColor("#38bdf8"))
+        self.fmt_keyword.setFontWeight(QFont.Bold)
+
+    def highlightBlock(self, text):
+        pattern = re.compile(r'\[(Пример|Важно|Заметка)?:?([^\]]*)\]', re.IGNORECASE)
+        for match in pattern.finditer(text):
+            start = match.start()
+            length = match.end() - start
+            # Фон всего блока
+            self.setFormat(start, length, self.fmt_block)
+            # Скобка открытия
+            self.setFormat(start, 1, self.fmt_bracket)
+            # Скобка закрытия
+            self.setFormat(match.end() - 1, 1, self.fmt_bracket)
+
+            # Ключевое слово
+            if match.group(1):
+                kw_len = len(match.group(1)) + 1
+                self.setFormat(start + 1, kw_len, self.fmt_keyword)
 
 
 class EntryEditorWindow(QMainWindow):
@@ -120,19 +221,45 @@ class EntryEditorWindow(QMainWindow):
         vbox_topic.addLayout(row_cat)
         layout.addLayout(vbox_topic)
 
-        # Row 3: Text Content
+        # Row 3: Text Content with Formatting Toolbar
         vbox_content = QVBoxLayout()
         vbox_content.setSpacing(6)
+
+        row_toolbar = QHBoxLayout()
         lbl_content = QLabel("Текст")
         lbl_content.setObjectName("sectionHeader")
+        row_toolbar.addWidget(lbl_content)
+        row_toolbar.addStretch()
+
+        # Quick Callout Buttons
+        self.btn_insert_example = QPushButton("+ Блок примера (Ctrl+E)")
+        self.btn_insert_example.setObjectName("btnSecondarySmall")
+        self.btn_insert_example.setToolTip("Вставляет карточку для примера: [Пример: ...]")
+        self.btn_insert_example.clicked.connect(lambda: self.insert_callout("Пример"))
+
+        self.btn_insert_note = QPushButton("+ Заметка")
+        self.btn_insert_note.setObjectName("btnSecondarySmall")
+        self.btn_insert_note.clicked.connect(lambda: self.insert_callout("Заметка"))
+
+        self.btn_insert_warn = QPushButton("+ Важно")
+        self.btn_insert_warn.setObjectName("btnSecondarySmall")
+        self.btn_insert_warn.clicked.connect(lambda: self.insert_callout("Важно"))
+
+        row_toolbar.addWidget(self.btn_insert_example)
+        row_toolbar.addWidget(self.btn_insert_note)
+        row_toolbar.addWidget(self.btn_insert_warn)
+
+        vbox_content.addLayout(row_toolbar)
 
         self.text_content = QTextEdit()
         self.text_content.setAcceptRichText(False)
         self.text_content.setObjectName("editorText")
-        self.text_content.setPlaceholderText("Пишите сюда свои мысли...")
+        self.text_content.setPlaceholderText("Пишите сюда свои мысли. Для создания блока примера введите [Пример: ...] или нажмите кнопку выше...")
         self.text_content.textChanged.connect(self.update_counts)
 
-        vbox_content.addWidget(lbl_content)
+        # Attach Highlighter
+        self.highlighter = CalloutHighlighter(self.text_content.document())
+
         vbox_content.addWidget(self.text_content)
         layout.addLayout(vbox_content, stretch=1)
 
@@ -168,6 +295,30 @@ class EntryEditorWindow(QMainWindow):
                 self.combo_category.setCurrentIndex(index)
 
         self.update_counts()
+
+    def insert_callout(self, kind="Пример"):
+        cursor = self.text_content.textCursor()
+        prefix = f"[{kind}: "
+        suffix = "]"
+        
+        # If user selected text, wrap it
+        if cursor.hasSelection():
+            selected = cursor.selectedText()
+            cursor.insertText(f"{prefix}{selected}{suffix}")
+        else:
+            pos = cursor.position() + len(prefix)
+            cursor.insertText(f"{prefix}{suffix}")
+            cursor.setPosition(pos)
+            self.text_content.setTextCursor(cursor)
+        self.text_content.setFocus()
+
+    def keyPressEvent(self, event):
+        # Shortcut Ctrl+E for inserting example callout
+        if event.modifiers() == Qt.ControlModifier and event.key() == Qt.Key_E:
+            self.insert_callout("Пример")
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def populate_categories(self):
         self.combo_category.clear()
@@ -389,7 +540,7 @@ class MainWindow(QMainWindow):
         self.view_meta.setWordWrap(True)
         cp_layout.addWidget(self.view_meta)
 
-        # Content
+        # Content (Styled HTML Reader)
         self.view_content = QTextEdit()
         self.view_content.setAcceptRichText(False)
         self.view_content.setObjectName("viewerText")
@@ -524,6 +675,9 @@ class MainWindow(QMainWindow):
         for entry in entries:
             date_formatted = format_russian_date(entry["date"])
             preview = entry["content"].replace("\n", " ").strip()
+            # Clean preview from callout brackets
+            preview = re.sub(r'\[(Пример|Важно|Заметка)?:?\s*', '', preview)
+            preview = preview.replace(']', '')
             if len(preview) > 55:
                 preview = preview[:55] + "..."
 
@@ -595,7 +749,9 @@ class MainWindow(QMainWindow):
             f"Время письма: {writing_duration}   •   {entry['word_count']} слов"
         )
         self.view_meta.setText(meta_text)
-        self.view_content.setPlainText(entry["content"])
+        
+        # Render HTML with Callouts (brackets disappear and transform into cards)
+        self.view_content.setHtml(format_entry_to_html(entry["content"]))
         self.btn_edit.setEnabled(True)
         self.btn_delete.setEnabled(True)
 
@@ -676,7 +832,6 @@ def main():
     app = QApplication(sys.argv)
     app.setStyleSheet(get_stylesheet())
     window = MainWindow()
-    # Главное окно открывается сразу в полный экран
     window.showMaximized()
     sys.exit(app.exec_())
 
