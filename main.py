@@ -63,10 +63,6 @@ def format_duration(seconds):
 
 
 def get_clean_text(raw_content):
-    """
-    Извлекает чистый текст без тегов и без CSS-стилей (head/style)
-    для отображения в превью карточек и точного подсчета слов.
-    """
     if not raw_content:
         return ""
     text = re.sub(r'<head[^>]*>.*?</head>', '', raw_content, flags=re.DOTALL | re.IGNORECASE)
@@ -76,10 +72,12 @@ def get_clean_text(raw_content):
     return text
 
 
+def is_block_char(cursor):
+    bg = cursor.charFormat().background().color()
+    return bg.isValid() and bg.alpha() > 0 and bg.name() != "#000000"
+
+
 class SettingsDialog(QDialog):
-    """
-    Диалог настройки размеров шрифта с живым предпросмотром.
-    """
     def __init__(self, parent=None, db=None):
         super().__init__(parent)
         self.db = db
@@ -96,7 +94,6 @@ class SettingsDialog(QDialog):
         lbl_hdr.setObjectName("sectionHeader")
         layout.addWidget(lbl_hdr)
 
-        # Base font size
         row_base = QHBoxLayout()
         lbl_base = QLabel("Размер основного текста:")
         lbl_base.setObjectName("statItem")
@@ -111,7 +108,6 @@ class SettingsDialog(QDialog):
         row_base.addWidget(self.spin_base)
         layout.addLayout(row_base)
 
-        # Example block font size
         row_example = QHBoxLayout()
         lbl_example = QLabel("Размер текста в блоках примеров:")
         lbl_example.setObjectName("statItem")
@@ -126,7 +122,6 @@ class SettingsDialog(QDialog):
         row_example.addWidget(self.spin_example)
         layout.addLayout(row_example)
 
-        # Live Preview Box
         lbl_prev = QLabel("Предпросмотр")
         lbl_prev.setObjectName("sectionHeader")
         layout.addWidget(lbl_prev)
@@ -138,7 +133,6 @@ class SettingsDialog(QDialog):
 
         self.update_preview()
 
-        # Dialog Buttons
         row_btn = QHBoxLayout()
         self.btn_reset = QPushButton("Сбросить по умолчанию")
         self.btn_reset.setObjectName("btnSecondarySmall")
@@ -178,7 +172,6 @@ class SettingsDialog(QDialog):
         example_val = self.spin_example.value()
         self.db.set_setting("base_font_size", str(base_val))
         self.db.set_setting("example_font_size", str(example_val))
-        # Обновляем все существующие записи в базе данных
         self.db.update_all_entries_font_sizes(base_val, example_val)
         self.accept()
 
@@ -186,9 +179,10 @@ class SettingsDialog(QDialog):
 class DiaryTextEdit(QTextEdit):
     """
     Редактор дневника:
-    При вводе скобок [пример] скобки мгновенно исчезают,
-    а текст внутри превращается в аккуратный блок-выделение
-    с размером из настроек.
+    - При вводе [текст] скобки исчезают, превращая текст в выделенный блок.
+    - Однократный Ctrl+Z сразу возвращает исходные скобки [текст].
+    - Правый клик по блоку: «Вернуть квадратные скобки [ ]» или «Убрать выделение блока».
+    - При выделении текста и нажатии '[' или Ctrl+B текст оборачивается в блок.
     """
     def __init__(self, parent=None, base_font_size=13, example_font_size=12):
         super().__init__(parent)
@@ -199,7 +193,7 @@ class DiaryTextEdit(QTextEdit):
         self.default_format = QTextCharFormat()
         self.default_format.setFontPointSize(self.base_font_size)
         self.default_format.setForeground(QColor("#e4e4e7"))
-        self.default_format.setBackground(QColor("transparent"))
+        self.default_format.setBackground(QColor(0, 0, 0, 0))
         self.default_format.setFontWeight(QFont.Normal)
         self.setCurrentCharFormat(self.default_format)
 
@@ -208,7 +202,6 @@ class DiaryTextEdit(QTextEdit):
         self.example_font_size = float(example_font_size)
         self.default_format.setFontPointSize(self.base_font_size)
         self.setCurrentCharFormat(self.default_format)
-        # Refresh current content with new sizes
         current_html = self.toHtml()
         self.setHtml(update_html_font_sizes(current_html, self.base_font_size, self.example_font_size))
 
@@ -224,6 +217,8 @@ class DiaryTextEdit(QTextEdit):
                 start_pos = cursor.block().position() + last_open
                 end_pos = cursor.block().position() + pos_in_block
 
+                # Единый блок редактирования для моментального отката через Ctrl+Z
+                cursor.beginEditBlock()
                 cursor.setPosition(start_pos)
                 cursor.setPosition(end_pos, QTextCursor.KeepAnchor)
 
@@ -234,6 +229,8 @@ class DiaryTextEdit(QTextEdit):
                 fmt.setFontWeight(QFont.Normal)
 
                 cursor.insertText(' ' + content + ' ', fmt)
+                cursor.endEditBlock()
+
                 self.setCurrentCharFormat(self.default_format)
                 return True
         return False
@@ -264,11 +261,140 @@ class DiaryTextEdit(QTextEdit):
         cursor.endEditBlock()
         self.setCurrentCharFormat(self.default_format)
 
+    def get_block_bounds(self, pos):
+        doc = self.document()
+        start = pos
+        while start > 0:
+            chk = QTextCursor(doc)
+            chk.setPosition(start - 1)
+            chk.setPosition(start, QTextCursor.KeepAnchor)
+            if not is_block_char(chk):
+                break
+            start -= 1
+
+        end = pos
+        doc_len = doc.characterCount() - 1
+        while end < doc_len:
+            chk = QTextCursor(doc)
+            chk.setPosition(end)
+            chk.setPosition(end + 1, QTextCursor.KeepAnchor)
+            if not is_block_char(chk):
+                break
+            end += 1
+        return start, end
+
+    def is_cursor_in_block(self):
+        cursor = self.textCursor()
+        pos = cursor.position()
+        doc = self.document()
+        if pos > 0:
+            c = QTextCursor(doc)
+            c.setPosition(pos - 1)
+            c.setPosition(pos, QTextCursor.KeepAnchor)
+            if is_block_char(c):
+                return True
+        if pos < doc.characterCount() - 1:
+            c = QTextCursor(doc)
+            c.setPosition(pos)
+            c.setPosition(pos + 1, QTextCursor.KeepAnchor)
+            if is_block_char(c):
+                return True
+        return False
+
+    def restore_brackets_at_cursor(self):
+        """Возвращает скобки [текст] обратно, чтобы их можно было увидеть и отредактировать"""
+        cursor = self.textCursor()
+        start, end = self.get_block_bounds(cursor.position())
+        if start < end:
+            c = QTextCursor(self.document())
+            c.beginEditBlock()
+            c.setPosition(start)
+            c.setPosition(end, QTextCursor.KeepAnchor)
+            text = c.selectedText().strip()
+            c.insertText(f"[{text}]", self.default_format)
+            c.endEditBlock()
+            self.setTextCursor(c)
+
+    def remove_block_at_cursor(self):
+        """Снимает выделение блока, превращая текст в обычный"""
+        cursor = self.textCursor()
+        if cursor.hasSelection():
+            cursor.setCharFormat(self.default_format)
+        else:
+            start, end = self.get_block_bounds(cursor.position())
+            if start < end:
+                c = QTextCursor(self.document())
+                c.beginEditBlock()
+                c.setPosition(start)
+                c.setPosition(end, QTextCursor.KeepAnchor)
+                text = c.selectedText().strip()
+                c.insertText(text, self.default_format)
+                c.endEditBlock()
+                self.setTextCursor(c)
+
+    def wrap_selection_in_block(self):
+        """Оборачивает текущий выделенный текст в блок-выделение"""
+        cursor = self.textCursor()
+        if cursor.hasSelection():
+            selected = cursor.selectedText().strip()
+            cursor.beginEditBlock()
+            fmt = QTextCharFormat()
+            fmt.setFontPointSize(self.example_font_size)
+            fmt.setBackground(QColor("#1e293b"))
+            fmt.setForeground(QColor("#e2e8f0"))
+            fmt.setFontWeight(QFont.Normal)
+            cursor.insertText(' ' + selected + ' ', fmt)
+            cursor.endEditBlock()
+            self.setCurrentCharFormat(self.default_format)
+
+    def contextMenuEvent(self, event):
+        menu = self.createStandardContextMenu()
+
+        in_block = self.is_cursor_in_block()
+        has_sel = self.textCursor().hasSelection()
+
+        if in_block or has_sel:
+            menu.addSeparator()
+
+            if in_block:
+                action_restore = QAction("Вернуть квадратные скобки [ ]", self)
+                action_restore.setToolTip("Возвращает [текст], чтобы скобки можно было увидеть и стереть")
+                action_restore.triggered.connect(self.restore_brackets_at_cursor)
+                menu.addAction(action_restore)
+
+                action_remove = QAction("Снять выделение блока (сделать обычным)", self)
+                action_remove.triggered.connect(self.remove_block_at_cursor)
+                menu.addAction(action_remove)
+
+            if has_sel and not in_block:
+                action_wrap = QAction("Оформить в блок-выделение", self)
+                action_wrap.triggered.connect(self.wrap_selection_in_block)
+                menu.addAction(action_wrap)
+
+        menu.exec_(event.globalPos())
+
     def keyPressEvent(self, event):
+        # 1. При вводе закрывающей скобки ']'
         if event.text() == ']':
             if self.convert_live_bracket():
                 event.accept()
                 return
+
+        # 2. Если выделен текст и пользователь нажал '[': сразу превращаем в блок
+        if event.text() == '[' and self.textCursor().hasSelection():
+            self.wrap_selection_in_block()
+            event.accept()
+            return
+
+        # 3. Горячая клавиша Ctrl+B для переключения блока
+        if event.modifiers() == Qt.ControlModifier and event.key() == Qt.Key_B:
+            if self.is_cursor_in_block():
+                self.restore_brackets_at_cursor()
+            elif self.textCursor().hasSelection():
+                self.wrap_selection_in_block()
+            event.accept()
+            return
+
         super().keyPressEvent(event)
 
     def insertFromMimeData(self, source):
@@ -281,10 +407,6 @@ class DiaryTextEdit(QTextEdit):
 
 
 class EntryEditorWindow(QMainWindow):
-    """
-    Полноэкранное окно создания / редактирования записи.
-    Независимое окно (не блокирует родителя).
-    """
     saved = pyqtSignal()
 
     def __init__(self, parent_window=None, db=None, entry=None, categories=None, preselected_category=None):
@@ -659,11 +781,9 @@ class MainWindow(QMainWindow):
     def open_settings(self):
         dialog = SettingsDialog(self, db=self.db)
         if dialog.exec_() == QDialog.Accepted:
-            # Refresh main window reader
             self.load_entries()
             self.on_entry_selected()
             
-            # Refresh any open editor windows
             base_sz = self.db.get_setting("base_font_size", "13")
             ex_sz = self.db.get_setting("example_font_size", "12")
             for editor in self.active_editor_windows:
@@ -808,7 +928,6 @@ class MainWindow(QMainWindow):
 
         self.entries_list.blockSignals(False)
 
-        # Status text
         parts = []
         if self.selected_topic:
             parts.append(f"Категория: {self.selected_topic}")
@@ -836,7 +955,6 @@ class MainWindow(QMainWindow):
         self.btn_edit.setEnabled(False)
         self.btn_delete.setEnabled(False)
 
-    # Handlers
     def on_entry_selected(self):
         current_item = self.entries_list.currentItem()
         if not current_item:
@@ -869,7 +987,6 @@ class MainWindow(QMainWindow):
         )
         self.view_meta.setText(meta_text)
         
-        # Load font sizes from settings and render
         base_sz = int(float(self.db.get_setting("base_font_size", "13")))
         ex_sz = int(float(self.db.get_setting("example_font_size", "12")))
         
@@ -900,7 +1017,6 @@ class MainWindow(QMainWindow):
             self.db.add_category(name.strip())
             self.load_categories()
 
-    # Modeless Fullscreen Editor Window Openers with Parent Binding
     def on_new_entry(self):
         categories = self.db.get_categories()
         editor = EntryEditorWindow(
