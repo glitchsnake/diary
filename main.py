@@ -62,30 +62,41 @@ def format_duration(seconds):
 
 
 def get_clean_text(raw_content):
-    """Извлекает чистый текст без HTML тегов для превью и подсчета слов"""
+    """
+    Извлекает чистый текст без тегов и без CSS-стилей (head/style)
+    для отображения в превью карточек и точного подсчета слов.
+    """
     if not raw_content:
         return ""
-    text = re.sub(r'<[^>]+>', ' ', raw_content)
+    # Вырезаем служебные блоки head и style целиком
+    text = re.sub(r'<head[^>]*>.*?</head>', '', raw_content, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'<[^>]+>', ' ', text)
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
 
 def ensure_html_formatting(raw_content):
     """
-    Если в тексте остались старые скобки [текст],
-    преобразует их в блоки со стилями (без добавления слова 'пример').
+    Отображение записи в ридере:
+    - Блоки оформлены аккуратным фоном
+    - Шрифт умеренный (14pt, чуть крупнее 13.5pt, аккуратный средний размер)
+    - Скобки [ ] скрыты
     """
     if not raw_content:
         return ""
+
     if "<html" in raw_content.lower() or "<body" in raw_content.lower():
-        # Already HTML, ensure any raw brackets inside are transformed
+        # Если это HTML из редактора, заменяем слишком крупный шрифт на умеренный средний (14pt)
+        modified = re.sub(r'font-size:\s*15\.5pt', 'font-size: 14pt', raw_content, flags=re.IGNORECASE)
+        # Также преобразуем любые оставшиеся сырые скобки [текст]
         pattern = re.compile(r'\[([^\]\n<]+)\]')
         def repl(m):
             t = m.group(1).strip()
-            return f'<span style="background-color: #1e293b; font-size: 15.5pt; color: #e2e8f0; border-radius: 4px; padding: 2px 6px;"> {t} </span>'
-        return pattern.sub(repl, raw_content)
+            return f'<span style="background-color: #1e293b; font-size: 14pt; color: #e2e8f0; border-radius: 4px; padding: 2px 5px;"> {t} </span>'
+        return pattern.sub(repl, modified)
     else:
-        # Plain text
+        # Обычный текст
         lines = raw_content.split("\n")
         out = ['<div style="color: #e4e4e7; font-size: 13.5pt; line-height: 1.7; font-family: -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif;">']
         pattern = re.compile(r'\[([^\]\n]+)\]')
@@ -96,9 +107,8 @@ def ensure_html_formatting(raw_content):
                 continue
 
             escaped = html.escape(line)
-            # Превращаем [текст] в средний блок-выделение
             transformed = pattern.sub(
-                r'<span style="background-color: #1e293b; font-size: 15.5pt; color: #e2e8f0; border-radius: 4px; padding: 2px 6px;"> \1 </span>',
+                r'<span style="background-color: #1e293b; font-size: 14pt; color: #e2e8f0; border-radius: 4px; padding: 2px 5px;"> \1 </span>',
                 escaped
             )
             out.append(f"<div style='margin-bottom: 4px;'>{transformed}</div>")
@@ -111,8 +121,8 @@ class DiaryTextEdit(QTextEdit):
     """
     Редактор дневника:
     При вводе скобок [пример] в процессе написания
-    скобки мгновенно исчезают, а текст внутри превращается в блок-выделение
-    со средним чуть увеличенным шрифтом (без лишних слов и без жирного белого цвета).
+    скобки мгновенно исчезают, а текст внутри превращается в аккуратный блок-выделение
+    с умеренным размером шрифта (14pt).
     """
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -140,9 +150,9 @@ class DiaryTextEdit(QTextEdit):
                 cursor.setPosition(start_pos)
                 cursor.setPosition(end_pos, QTextCursor.KeepAnchor)
 
-                # Средний шрифт (15.5pt вместо 13.5pt), блок-выделение (#1e293b), мягкий читаемый цвет
+                # Умеренный средний размер шрифта (14pt при базовом 13.5pt)
                 fmt = QTextCharFormat()
-                fmt.setFontPointSize(15.5)
+                fmt.setFontPointSize(14.0)
                 fmt.setBackground(QColor("#1e293b"))
                 fmt.setForeground(QColor("#e2e8f0"))
                 fmt.setFontWeight(QFont.Normal)
@@ -169,7 +179,7 @@ class DiaryTextEdit(QTextEdit):
                 c.setPosition(end, QTextCursor.KeepAnchor)
 
                 fmt = QTextCharFormat()
-                fmt.setFontPointSize(15.5)
+                fmt.setFontPointSize(14.0)
                 fmt.setBackground(QColor("#1e293b"))
                 fmt.setForeground(QColor("#e2e8f0"))
                 fmt.setFontWeight(QFont.Normal)
@@ -179,7 +189,6 @@ class DiaryTextEdit(QTextEdit):
         self.setCurrentCharFormat(self.default_format)
 
     def keyPressEvent(self, event):
-        # При вводе закрывающей квадратной скобки ']'
         if event.text() == ']':
             if self.convert_live_bracket():
                 event.accept()
@@ -187,7 +196,6 @@ class DiaryTextEdit(QTextEdit):
         super().keyPressEvent(event)
 
     def insertFromMimeData(self, source):
-        # При вставке текста
         if source.hasText():
             cursor = self.textCursor()
             cursor.insertText(source.text(), self.default_format)
@@ -198,12 +206,14 @@ class DiaryTextEdit(QTextEdit):
 
 class EntryEditorWindow(QMainWindow):
     """
-    Полноэкранное немодальное окно создания / редактирования записи.
+    Полноэкранное окно создания / редактирования записи.
+    При закрытии или сохранении обязательно передает фокус обратно главному приложению.
     """
     saved = pyqtSignal()
 
-    def __init__(self, db, entry=None, categories=None, preselected_category=None):
-        super().__init__()
+    def __init__(self, parent=None, db=None, entry=None, categories=None, preselected_category=None):
+        super().__init__(parent)
+        self.parent_window = parent
         self.db = db
         self.entry = entry
         self.categories = [c["name"] for c in (categories or [])]
@@ -266,7 +276,7 @@ class EntryEditorWindow(QMainWindow):
 
         self.text_content = DiaryTextEdit()
         self.text_content.setObjectName("editorText")
-        self.text_content.setPlaceholderText("Пишите сюда свои мысли. Пример можно обрамить [в квадратные скобки] — скобки сразу исчезнут, и текст станет выделенным блоком...")
+        self.text_content.setPlaceholderText("Пишите сюда свои мысли. Пример можно обрамить [в квадратные скобки] — скобки сразу исчезнут, и текст станет аккуратным блоком...")
         self.text_content.textChanged.connect(self.update_counts)
 
         vbox_content.addWidget(self.text_content)
@@ -339,6 +349,16 @@ class EntryEditorWindow(QMainWindow):
         chars = len(clean)
         self.lbl_counter.setText(f"{words} слов  •  {chars} знаков")
 
+    def return_to_parent(self):
+        if self.parent_window:
+            self.parent_window.showMaximized()
+            self.parent_window.raise_()
+            self.parent_window.activateWindow()
+
+    def closeEvent(self, event):
+        self.return_to_parent()
+        super().closeEvent(event)
+
     def save_entry(self):
         title = self.edit_title.text().strip()
         html_content = self.text_content.toHtml()
@@ -369,6 +389,7 @@ class EntryEditorWindow(QMainWindow):
 
         self.saved.emit()
         self.close()
+        self.return_to_parent()
 
 
 class MainWindow(QMainWindow):
@@ -666,7 +687,7 @@ class MainWindow(QMainWindow):
         for entry in entries:
             date_formatted = format_russian_date(entry["date"])
             clean = get_clean_text(entry["content"])
-            preview = clean[:55] + "..." if len(clean) > 55 else clean
+            preview = clean[:60] + "..." if len(clean) > 60 else clean
 
             card_text = (
                 f"{entry['title']}\n"
@@ -768,9 +789,11 @@ class MainWindow(QMainWindow):
             self.db.add_category(name.strip())
             self.load_categories()
 
+    # Modeless Fullscreen Editor Window Openers with Parent Binding
     def on_new_entry(self):
         categories = self.db.get_categories()
         editor = EntryEditorWindow(
+            parent=self,
             db=self.db,
             categories=categories,
             preselected_category=self.selected_topic
@@ -789,6 +812,7 @@ class MainWindow(QMainWindow):
 
         categories = self.db.get_categories()
         editor = EntryEditorWindow(
+            parent=self,
             db=self.db,
             entry=entry,
             categories=categories
