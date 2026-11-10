@@ -7,10 +7,10 @@ from datetime import datetime
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QTextEdit, QListWidget, QListWidgetItem,
-    QSplitter, QDialog, QComboBox, QMessageBox, QFrame, QInputDialog, QMenu, QAction
+    QSplitter, QComboBox, QMessageBox, QFrame, QInputDialog, QMenu, QAction
 )
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QFont, QCursor
+from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtGui import QFont
 
 from database import DiaryDB
 from styles import get_stylesheet
@@ -59,28 +59,30 @@ def format_duration(seconds):
     return f"{seconds} сек"
 
 
-class EntryEditorDialog(QDialog):
+class EntryEditorWindow(QMainWindow):
     """
-    Окно создания / редактирования записи.
-    - Категории выбираются из готового списка (без ручного повторного ввода).
-    - Дата проставляется автоматически.
-    - Время считается фоново без таймера перед глазами.
+    Отдельное полноэкранное окно создания / редактирования записи.
+    Не блокирует главное окно (немодальное).
     """
-    def __init__(self, parent=None, entry=None, categories=None, preselected_category=None):
-        super().__init__(parent)
+    saved = pyqtSignal()
+
+    def __init__(self, db, entry=None, categories=None, preselected_category=None):
+        super().__init__()
+        self.db = db
         self.entry = entry
         self.categories = [c["name"] for c in (categories or [])]
         self.preselected_category = preselected_category
         self.start_timestamp = time.time()
 
         self.setWindowTitle("Редактирование записи" if entry else "Новая запись")
-        self.resize(720, 580)
         self.init_ui()
 
     def init_ui(self):
-        layout = QVBoxLayout(self)
+        central = QWidget()
+        self.setCentralWidget(central)
+        layout = QVBoxLayout(central)
         layout.setSpacing(14)
-        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setContentsMargins(40, 30, 40, 30)
 
         # Row 1: Title
         vbox_title = QVBoxLayout()
@@ -89,6 +91,7 @@ class EntryEditorDialog(QDialog):
         lbl_title.setObjectName("sectionHeader")
         self.edit_title = QLineEdit()
         self.edit_title.setPlaceholderText("О чем эта запись?")
+        self.edit_title.setFont(QFont("", 14))
         vbox_title.addWidget(lbl_title)
         vbox_title.addWidget(self.edit_title)
         layout.addLayout(vbox_title)
@@ -100,7 +103,7 @@ class EntryEditorDialog(QDialog):
         lbl_topic.setObjectName("sectionHeader")
 
         row_cat = QHBoxLayout()
-        row_cat.setSpacing(8)
+        row_cat.setSpacing(10)
 
         self.combo_category = QComboBox()
         self.combo_category.setEditable(False)
@@ -130,7 +133,7 @@ class EntryEditorDialog(QDialog):
 
         vbox_content.addWidget(lbl_content)
         vbox_content.addWidget(self.text_content)
-        layout.addLayout(vbox_content)
+        layout.addLayout(vbox_content, stretch=1)
 
         # Footer Row
         row_footer = QHBoxLayout()
@@ -141,10 +144,10 @@ class EntryEditorDialog(QDialog):
         row_footer.addStretch()
 
         self.btn_cancel = QPushButton("Отмена")
-        self.btn_cancel.clicked.connect(self.reject)
+        self.btn_cancel.clicked.connect(self.close)
         row_footer.addWidget(self.btn_cancel)
 
-        self.btn_save = QPushButton("Сохранить")
+        self.btn_save = QPushButton("Сохранить запись")
         self.btn_save.setObjectName("btnPrimary")
         self.btn_save.clicked.connect(self.save_entry)
         row_footer.addWidget(self.btn_save)
@@ -180,6 +183,7 @@ class EntryEditorDialog(QDialog):
         )
         if ok and name.strip():
             cat_name = name.strip()
+            self.db.add_category(cat_name)
             if cat_name not in self.categories:
                 self.categories.append(cat_name)
                 self.populate_categories()
@@ -199,16 +203,28 @@ class EntryEditorDialog(QDialog):
         if not title and not content:
             QMessageBox.warning(self, "Внимание", "Запись не может быть пустой.")
             return
-        self.accept()
 
-    def get_data(self):
         elapsed_seconds = int(time.time() - self.start_timestamp)
-        return {
-            "title": self.edit_title.text().strip() or "Запись без названия",
-            "topic": self.combo_category.currentText().strip() or "Общее",
-            "content": self.text_content.toPlainText().strip(),
-            "duration_seconds": elapsed_seconds
-        }
+        topic = self.combo_category.currentText().strip() or "Общее"
+
+        if self.entry:
+            self.db.update_entry(
+                entry_id=self.entry["id"],
+                title=title or "Запись без названия",
+                topic=topic,
+                content=content,
+                added_duration_seconds=elapsed_seconds
+            )
+        else:
+            self.db.add_entry(
+                title=title or "Запись без названия",
+                topic=topic,
+                content=content,
+                duration_seconds=elapsed_seconds
+            )
+
+        self.saved.emit()
+        self.close()
 
 
 class MainWindow(QMainWindow):
@@ -218,9 +234,9 @@ class MainWindow(QMainWindow):
         self.selected_topic = None
         self.selected_date = None
         self.current_entry_id = None
+        self.active_editor_windows = []
 
         self.setWindowTitle("Дневник")
-        self.resize(1140, 720)
         self.setMinimumSize(850, 540)
         self.init_ui()
         self.load_all()
@@ -273,7 +289,6 @@ class MainWindow(QMainWindow):
         self.topics_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.topics_list.setMaximumHeight(160)
         self.topics_list.itemClicked.connect(self.on_topic_clicked)
-        # Enable Right-Click Context Menu for Categories
         self.topics_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.topics_list.customContextMenuRequested.connect(self.on_category_context_menu)
         sb_layout.addWidget(self.topics_list)
@@ -605,22 +620,18 @@ class MainWindow(QMainWindow):
             self.db.add_category(name.strip())
             self.load_categories()
 
+    # Modeless Fullscreen Editor Window Openers
     def on_new_entry(self):
         categories = self.db.get_categories()
-        dialog = EntryEditorDialog(
-            self,
+        editor = EntryEditorWindow(
+            db=self.db,
             categories=categories,
             preselected_category=self.selected_topic
         )
-        if dialog.exec_() == QDialog.Accepted:
-            data = dialog.get_data()
-            self.db.add_entry(
-                title=data["title"],
-                topic=data["topic"],
-                content=data["content"],
-                duration_seconds=data["duration_seconds"]
-            )
-            self.load_all()
+        editor.saved.connect(self.load_all)
+        self.active_editor_windows.append(editor)
+        editor.destroyed.connect(lambda: self._cleanup_editor(editor))
+        editor.showMaximized()
 
     def on_edit_entry(self):
         if not self.current_entry_id:
@@ -630,21 +641,19 @@ class MainWindow(QMainWindow):
             return
 
         categories = self.db.get_categories()
-        dialog = EntryEditorDialog(
-            self,
+        editor = EntryEditorWindow(
+            db=self.db,
             entry=entry,
             categories=categories
         )
-        if dialog.exec_() == QDialog.Accepted:
-            data = dialog.get_data()
-            self.db.update_entry(
-                entry_id=entry["id"],
-                title=data["title"],
-                topic=data["topic"],
-                content=data["content"],
-                added_duration_seconds=data["duration_seconds"]
-            )
-            self.load_all()
+        editor.saved.connect(self.load_all)
+        self.active_editor_windows.append(editor)
+        editor.destroyed.connect(lambda: self._cleanup_editor(editor))
+        editor.showMaximized()
+
+    def _cleanup_editor(self, editor):
+        if editor in self.active_editor_windows:
+            self.active_editor_windows.remove(editor)
 
     def on_delete_entry(self):
         if not self.current_entry_id:
@@ -665,7 +674,8 @@ def main():
     app = QApplication(sys.argv)
     app.setStyleSheet(get_stylesheet())
     window = MainWindow()
-    window.show()
+    # Главное окно открывается сразу в полный экран
+    window.showMaximized()
     sys.exit(app.exec_())
 
 
